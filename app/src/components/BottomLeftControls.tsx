@@ -5,7 +5,7 @@ import {
   ParkIcon,
   MountainsIcon,
   CubeIcon,
-} from '@phosphor-icons/react'
+} from '../icons'
 import { Tooltip } from '@radix-ui/themes'
 import { type ReactElement, useEffect } from 'react'
 import { useDebugStore } from '../store/debug'

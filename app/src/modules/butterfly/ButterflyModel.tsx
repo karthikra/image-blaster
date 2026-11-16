@@ -127,5 +127,7 @@ export const Butterfly = forwardRef<THREE.Group, Props>(function Butterfly(
   )
 })
 
+// Only the tiny GLB is preloaded. The four textures are 4.4 MB and butterflies
+// are off by default; preloading them at import competed with the world's own
+// first splat for bandwidth on every page load.
 useGLTF.preload(GLB_URL)
-TEX_URLS.forEach((url) => useTexture.preload(url))

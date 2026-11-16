@@ -9,7 +9,7 @@ import { fetchWorlds, loadWorlds } from './utils/worldLoader'
 import { useDebugStore } from './store/debug'
 import { isEditableTarget } from './utils/dom'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset } from './types/world'
-import { TerminalWindowIcon } from '@phosphor-icons/react'
+import { TerminalWindowIcon } from './icons'
 
 const LevaPanel = import.meta.env.DEV
   ? lazy(() => import('leva').then((module) => ({ default: module.Leva })))

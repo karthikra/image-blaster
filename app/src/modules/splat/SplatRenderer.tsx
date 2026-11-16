@@ -1,8 +1,9 @@
-import { useMemo, useRef, useEffect } from 'react'
+import { useMemo, useRef, useEffect, useState } from 'react'
 import { extend, useThree, useFrame } from '@react-three/fiber'
 import { SplatMesh, SparkRenderer } from '@sparkjsdev/spark'
 import * as THREE from 'three'
 import { useDebugStore } from '../../store/debug'
+import { useLoadingStore } from '../../store/loading'
 import { ViewerQuality } from '../../types/world'
 
 // Patch Spark's default vertex shader to swap the linear thin-lens CoC formula
@@ -21,6 +22,8 @@ uniform float sharpRange;
 uniform float falloffRate;`
 const DEFAULT_SHARP_RANGE = 2
 const DEFAULT_FALLOFF_RATE = 0.3
+// Start the full splat anyway if the preview has not loaded by then.
+const PREVIEW_WAIT_MS = 6000
 
 const SparkRendererEl = extend(SparkRenderer)
 const SplatMeshEl = extend(SplatMesh)
@@ -28,6 +31,8 @@ const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
 interface Props {
   url: string
+  // A low-detail LOD drawn until `url` has loaded, then dropped.
+  previewUrl?: string
   visible?: boolean
   groundPlaneOffset?: number
   flipY?: boolean
@@ -37,6 +42,7 @@ interface Props {
 
 export function SplatRenderer({
   url,
+  previewUrl = '',
   visible = true,
   groundPlaneOffset = 0,
   flipY,
@@ -44,7 +50,7 @@ export function SplatRenderer({
 }: Props) {
     const renderer = useThree((state) => state.gl)
     const viewerQuality = useDebugStore((s) => s.viewerQuality)
-    const splatRef = useRef<SplatMesh>(null)
+    const splatRef = useRef<SplatMesh | null>(null)
     const sparkRef = useRef<SparkRenderer>(null)
     const encodeLinear = viewerQuality === ViewerQuality.High
     const initialEncodeLinear = useRef(encodeLinear)
@@ -96,17 +102,62 @@ export function SplatRenderer({
     }, [encodeLinear])
 
     const sparkArgs = useMemo(() => ({ renderer, enableLod: true, encodeLinear: initialEncodeLinear.current }), [renderer])
+    const [fullReady, setFullReady] = useState(false)
+    // The full splat waits for the preview so the two do not split the
+    // bandwidth -- otherwise the 1.3 MB preview arrives no sooner than 29 MB.
+    const [previewDone, setPreviewDone] = useState(!previewUrl)
+    useEffect(() => {
+      setFullReady(false)
+      setPreviewDone(!previewUrl)
+      useLoadingStore.getState().beginSplat(url)
+      if (!previewUrl) return
+      const fallback = window.setTimeout(() => {
+        // Never leave the rest of the world waiting on a preview that failed.
+        setPreviewDone(true)
+        useLoadingStore.getState().setPreviewReady(url)
+      }, PREVIEW_WAIT_MS)
+      return () => window.clearTimeout(fallback)
+    }, [url, previewUrl])
+
     const splatArgs = useMemo(
       () => ({
         url,
+        onProgress: (event: ProgressEvent) => {
+          useLoadingStore.getState().setFullProgress(url, event.loaded, event.total)
+        },
+        onLoad: () => {
+          setFullReady(true)
+          useLoadingStore.getState().setFullReady(url)
+        },
       }),
       [url],
     )
+    const previewArgs = useMemo(
+      () => previewUrl
+        ? {
+            url: previewUrl,
+            onLoad: () => {
+              setPreviewDone(true)
+              useLoadingStore.getState().setPreviewReady(url)
+            },
+          }
+        : null,
+      [previewUrl, url],
+    )
+    const ignorePreviewRaycast = (mesh: SplatMesh | null) => {
+      if (mesh) mesh.raycast = ignoreRaycast
+    }
+    // Mounted after the preview, so the mount-time raycast effect misses it.
+    const attachFullSplat = (mesh: SplatMesh | null) => {
+      splatRef.current = mesh
+      if (mesh) mesh.raycast = ignoreRaycast
+    }
 
     return (
       <SparkRendererEl ref={sparkRef} args={[sparkArgs]} visible={visible}>
         <group position={[0, groundPlaneOffset, 0]} rotation={[flipY ? Math.PI : 0, 0, 0]} scale={metricScaleFactor}>
-          <SplatMeshEl ref={splatRef} args={[splatArgs]} />
+          {previewArgs && !fullReady && <SplatMeshEl key={previewUrl} ref={ignorePreviewRaycast} args={[previewArgs]} />}
+          {previewDone && <SplatMeshEl ref={attachFullSplat} args={[splatArgs]} />}
         </group>
       </SparkRendererEl>
     )

@@ -3,6 +3,69 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 import fs from 'fs'
 import { spawn } from 'child_process'
+import zlib from 'zlib'
+import type { IncomingMessage, ServerResponse } from 'http'
+
+// The dev server sends modules uncompressed, which is ~33 MB of JavaScript on a
+// cold load -- fine on localhost, slow over Tailscale. Gzip text responses.
+// World assets are left alone: .spz, .jpg and .mp3 are already compressed.
+const GZIP_TYPES = /^(text\/|application\/(javascript|json|wasm)|image\/svg)/
+const GZIP_MIN_BYTES = 1024
+
+function gzipTextResponses(req: IncomingMessage, res: ServerResponse, next: () => void) {
+  const acceptsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))
+  if (!acceptsGzip || req.url?.startsWith('/worlds/') || req.headers.upgrade) {
+    next()
+    return
+  }
+  const chunks: Buffer[] = []
+  const write = res.write.bind(res)
+  const end = res.end.bind(res)
+  const toBuffer = (chunk: unknown, encoding?: BufferEncoding) => {
+    if (Buffer.isBuffer(chunk)) return chunk
+    if (typeof chunk === 'string') return Buffer.from(chunk, encoding)
+    return Buffer.from(chunk as Uint8Array)
+  }
+
+  res.write = ((chunk: unknown, encoding?: unknown, callback?: unknown) => {
+    if (res.headersSent) return write(chunk as never, encoding as never, callback as never)
+    chunks.push(toBuffer(chunk, typeof encoding === 'string' ? encoding as BufferEncoding : undefined))
+    if (typeof encoding === 'function') encoding()
+    else if (typeof callback === 'function') callback()
+    return true
+  }) as ServerResponse['write']
+
+  res.end = ((chunk?: unknown, encoding?: unknown, callback?: unknown) => {
+    if (typeof chunk === 'function') {
+      callback = chunk
+      chunk = undefined
+    } else if (typeof encoding === 'function') {
+      callback = encoding
+      encoding = undefined
+    }
+    if (chunk !== undefined && chunk !== null) {
+      chunks.push(toBuffer(chunk, typeof encoding === 'string' ? encoding as BufferEncoding : undefined))
+    }
+    const body = Buffer.concat(chunks)
+    const type = String(res.getHeader('Content-Type') ?? '')
+    const compressible = !res.headersSent
+      && res.statusCode === 200
+      && body.length >= GZIP_MIN_BYTES
+      && !res.getHeader('Content-Encoding')
+      && GZIP_TYPES.test(type)
+    if (!compressible) {
+      if (!res.headersSent && body.length) res.setHeader('Content-Length', body.length)
+      return end(body, callback as never)
+    }
+    const gz = zlib.gzipSync(body, { level: 6 })
+    res.setHeader('Content-Encoding', 'gzip')
+    res.setHeader('Vary', 'Accept-Encoding')
+    res.setHeader('Content-Length', gz.length)
+    return end(gz, callback as never)
+  }) as ServerResponse['end']
+
+  next()
+}
 
 type WorldManifest = Record<string, unknown> & {
   assets?: Record<string, unknown> & {
@@ -669,6 +732,59 @@ function worldsPlugin(): Plugin {
     return true
   }
 
+  const MIME: Record<string, string> = {
+    '.spz': 'application/octet-stream',
+    '.glb': 'model/gltf-binary',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.jpg': 'image/jpeg',
+    '.mp3': 'audio/mpeg',
+    '.ogg': 'audio/ogg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.opus': 'audio/ogg',
+    '.json': 'application/json',
+  }
+
+  // World files (splats, meshes, images, sounds) for both the dev server and
+  // `vite preview`, which serves the production build.
+  const serveWorldFile = (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    const requestPath = decodeURIComponent((req.url || '/').split('?')[0])
+    const filePath = path.resolve(worldsDir, `.${requestPath}`)
+    const isInsideWorlds = filePath === worldsDir || filePath.startsWith(`${worldsDir}${path.sep}`)
+
+    if (!isInsideWorlds) {
+      res.statusCode = 404
+      res.end('Not found')
+      return
+    }
+
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      // Without a validator the browser cannot cache these, so every reload
+      // fetched the whole world again. An ETag from size and mtime lets a
+      // reload revalidate with a 304; regenerating an asset changes both.
+      const stat = fs.statSync(filePath)
+      const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`
+      const ext = path.extname(filePath).toLowerCase()
+      res.setHeader('ETag', etag)
+      res.setHeader('Last-Modified', stat.mtime.toUTCString())
+      res.setHeader('Cache-Control', 'no-cache')
+      if (req.headers['if-none-match'] === etag) {
+        res.statusCode = 304
+        res.end()
+        return
+      }
+      res.setHeader('Content-Type', MIME[ext] ?? 'application/octet-stream')
+      res.setHeader('Content-Length', String(stat.size))
+      fs.createReadStream(filePath).pipe(res)
+    } else if (path.extname(requestPath)) {
+      res.statusCode = 404
+      res.end('Not found')
+    } else {
+      next()
+    }
+  }
+
   return {
     name: 'worlds',
     resolveId(id) {
@@ -684,7 +800,13 @@ function worldsPlugin(): Plugin {
       notifyWorldsChanged(server)
       return []
     },
+    configurePreviewServer(server) {
+      // Preview already gzips (it uses the compression middleware), and the world
+      // list is baked into the bundle at build time, so this is all it lacks.
+      server.middlewares.use('/worlds', serveWorldFile)
+    },
     configureServer(server) {
+      server.middlewares.use(gzipTextResponses)
       server.watcher.add(worldsDir)
       const onWorldFsChange = (file: string) => {
         if (isVisibleWorldPath(file) || isGeneratedRequestPath(file)) notifyWorldsChanged(server)
@@ -693,19 +815,6 @@ function worldsPlugin(): Plugin {
       server.watcher.on('addDir', onWorldFsChange)
       server.watcher.on('unlink', onWorldFsChange)
       server.watcher.on('unlinkDir', onWorldFsChange)
-      const MIME: Record<string, string> = {
-        '.spz': 'application/octet-stream',
-        '.glb': 'model/gltf-binary',
-        '.png': 'image/png',
-        '.webp': 'image/webp',
-        '.jpg': 'image/jpeg',
-        '.mp3': 'audio/mpeg',
-        '.ogg': 'audio/ogg',
-        '.wav': 'audio/wav',
-        '.m4a': 'audio/mp4',
-        '.opus': 'audio/ogg',
-        '.json': 'application/json',
-      }
       server.middlewares.use('/__worlds', (_req, res) => {
         res.setHeader('Cache-Control', 'no-store')
         res.setHeader('Content-Type', 'application/json')
@@ -836,28 +945,7 @@ function worldsPlugin(): Plugin {
           }
         })
       })
-      server.middlewares.use('/worlds', (req, res, next) => {
-        const requestPath = decodeURIComponent((req.url || '/').split('?')[0])
-        const filePath = path.resolve(worldsDir, `.${requestPath}`)
-        const isInsideWorlds = filePath === worldsDir || filePath.startsWith(`${worldsDir}${path.sep}`)
-
-        if (!isInsideWorlds) {
-          res.statusCode = 404
-          res.end('Not found')
-          return
-        }
-
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          const ext = path.extname(filePath).toLowerCase()
-          res.setHeader('Content-Type', MIME[ext] ?? 'application/octet-stream')
-          fs.createReadStream(filePath).pipe(res)
-        } else if (path.extname(requestPath)) {
-          res.statusCode = 404
-          res.end('Not found')
-        } else {
-          next()
-        }
-      })
+      server.middlewares.use('/worlds', serveWorldFile)
     },
   }
 }

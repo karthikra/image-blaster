@@ -1,17 +1,34 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { ThreeEvent, useThree } from '@react-three/fiber'
-import { type RapierRigidBody, useAfterPhysicsStep, useBeforePhysicsStep, useRapier } from '@react-three/rapier'
+import { type RapierRigidBody, useBeforePhysicsStep } from '@react-three/rapier'
 import * as THREE from 'three'
 import { markObjectInteraction } from '../interaction/pointerGuards'
 import { SCENE_OBJECT_INSTANCE_ID_KEY, type SceneObjectHandle } from './SceneObject'
 
-const GRAB_LINEAR_SPEED_LIMIT = 5 
+/** Throw speed cap on release. */
+const GRAB_LINEAR_SPEED_LIMIT = 5
 const GRAB_ANGULAR_SPEED_LIMIT = 10
+/** While held, the object is steered by velocity toward the cursor. These cap how
+ * fast it may chase it, and what fraction of the gap it closes each physics step
+ * (1 would be exact but jittery against contacts). */
+const HOLD_LINEAR_SPEED_LIMIT = 10
+const HOLD_LINEAR_GAIN = 0.6
+/** Fraction of the remaining turn applied per step when R turns a held object. */
+const HOLD_ROTATION_EASE = 0.3
+/** Released slower than this, an object is being set down, not thrown: it lets go
+ * with no velocity, so a vase lowered onto a table stays where it was put. */
+const PLACE_SPEED_LIMIT = 0.8
+/** R / Shift+R turns a held object about the vertical by this much. */
+const ROTATE_STEP = Math.PI / 12
+/** Mouse wheel while holding pushes the object away or pulls it in, within these. */
+const GRAB_DEPTH_MIN = 0.3
+const GRAB_DEPTH_MAX = 10
+const GRAB_DEPTH_PER_WHEEL_PIXEL = 0.0008  // ~10% per 120-pixel wheel notch
+const UP = new THREE.Vector3(0, 1, 0)
 
 type ObjectRefMap = Map<string, RefObject<SceneObjectHandle | null>>
 
 interface UseObjectGrabArgs {
-  anchorRef: RefObject<RapierRigidBody | null>
   objectRefs: RefObject<ObjectRefMap>
   isObjectEligible?: (objectId: string) => boolean
 }
@@ -25,6 +42,26 @@ interface ActiveGrab {
   target: THREE.Vector3
   previousTarget: THREE.Vector3
   releaseVelocity: THREE.Vector3
+  /** The object's placed orientation from scene.json -- what "upright" means for it. */
+  restRotation: THREE.Quaternion
+  /** Turn about the vertical, relative to restRotation. */
+  yaw: number
+  /** restRotation turned by yaw: the held object is steered to this. */
+  targetRotation: THREE.Quaternion
+  /** The grabbed point, in the body's own frame. */
+  localAnchor: THREE.Vector3
+  /** Restored on release; gravity is off while the object is held. */
+  gravityScale: number
+}
+
+/** The part of `relative` that is a turn about the world vertical (swing-twist). */
+function twistAngleAboutUp(relative: THREE.Quaternion) {
+  if (Math.abs(relative.y) < 1e-6 && Math.abs(relative.w) < 1e-6) return 0
+  return 2 * Math.atan2(relative.y, relative.w)
+}
+
+function uprightRotation(rest: THREE.Quaternion, yaw: number, target: THREE.Quaternion) {
+  return target.setFromAxisAngle(UP, yaw).multiply(rest)
 }
 
 const _raycaster = new THREE.Raycaster()
@@ -36,6 +73,10 @@ const _localAnchor = new THREE.Vector3()
 const _bodyLinearVelocity = new THREE.Vector3()
 const _bodyAngularVelocity = new THREE.Vector3()
 const _objectCenter = new THREE.Vector3()
+const _grabPoint = new THREE.Vector3()
+const _leverArm = new THREE.Vector3()
+const _pointVelocity = new THREE.Vector3()
+const _currentRotation = new THREE.Quaternion()
 const _projectedObjectCenter = new THREE.Vector3()
 const _zeroVector = { x: 0, y: 0, z: 0 }
 
@@ -102,6 +143,37 @@ function computeLocalAnchor(body: RapierRigidBody, worldPoint: THREE.Vector3) {
   return _localAnchor.copy(worldPoint).sub(_bodyPosition).applyQuaternion(_inverseBodyRotation).clone()
 }
 
+/**
+ * Steer a held body so its grabbed point chases `target`, by setting velocity and
+ * letting the solver resolve contacts.
+ *
+ * This replaces a fixed joint to a kinematic anchor. A kinematic anchor has
+ * infinite mass, so when the cursor went into a table the joint and the contact
+ * fought and the joint won: the held object sank into the table, and anything in
+ * its path was shoved with unbounded force. Velocity is something contacts can
+ * stop, so a held object now meets surfaces and slides along them.
+ *
+ * Rotation is locked while held (contacts cannot tip it over) and eased toward
+ * `targetRotation` directly, which is only ever a turn about the vertical.
+ */
+function steerHeldBody(grab: ActiveGrab, dt: number) {
+  const body = grab.body
+  const translation = body.translation()
+  const rotation = body.rotation()
+  _currentRotation.set(rotation.x, rotation.y, rotation.z, rotation.w)
+  if (_currentRotation.angleTo(grab.targetRotation) > 1e-4) {
+    _currentRotation.slerp(grab.targetRotation, HOLD_ROTATION_EASE)
+    body.setRotation(quaternionLike(_currentRotation), true)
+  }
+
+  _leverArm.copy(grab.localAnchor).applyQuaternion(_currentRotation)
+  _grabPoint.set(translation.x, translation.y, translation.z).add(_leverArm)
+  _pointVelocity.copy(grab.target).sub(_grabPoint).multiplyScalar(HOLD_LINEAR_GAIN / dt)
+  if (_pointVelocity.length() > HOLD_LINEAR_SPEED_LIMIT) _pointVelocity.setLength(HOLD_LINEAR_SPEED_LIMIT)
+  body.setLinvel(vectorLike(_pointVelocity), true)
+  body.setAngvel(_zeroVector, true)
+}
+
 function clampBodyVelocity(body: RapierRigidBody) {
   let linear
   let angular
@@ -125,28 +197,15 @@ function clampBodyVelocity(body: RapierRigidBody) {
   return true
 }
 
-export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseObjectGrabArgs) {
+export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArgs) {
   const { camera, gl } = useThree()
-  const { rapier, world } = useRapier()
   const [activeObjectId, setActiveObjectId] = useState<string | null>(null)
   const activeGrabRef = useRef<ActiveGrab | null>(null)
-  const jointRef = useRef<ReturnType<typeof world.createImpulseJoint> | null>(null)
   const mountedRef = useRef(true)
 
   const setActiveObjectIdSafe = useCallback((objectId: string | null) => {
     if (mountedRef.current) setActiveObjectId(objectId)
   }, [])
-
-  const removeJoint = useCallback(() => {
-    const joint = jointRef.current
-    if (!joint) return
-    jointRef.current = null
-    try {
-      world.removeImpulseJoint(joint, true)
-    } catch {
-      // The Rapier world may already be unloading; stale joints can be ignored.
-    }
-  }, [world])
 
   const updatePointerTarget = useCallback(
     (grab: ActiveGrab) => {
@@ -160,15 +219,21 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
     const activeGrab = activeGrabRef.current
     if (!activeGrab) return
 
-    removeJoint()
-
     if (isBodyUsable(activeGrab.body)) {
+      activeGrab.body.setGravityScale(activeGrab.gravityScale, true)
+      activeGrab.body.lockRotations(false, true)
       const releaseVelocity = activeGrab.releaseVelocity.clone()
-      if (releaseVelocity.length() > GRAB_LINEAR_SPEED_LIMIT) {
-        releaseVelocity.setLength(GRAB_LINEAR_SPEED_LIMIT)
+      if (releaseVelocity.length() < PLACE_SPEED_LIMIT) {
+        // Set down: upright, at rest, and it simply settles onto what is below.
+        activeGrab.body.setLinvel(_zeroVector, true)
+        activeGrab.body.setAngvel(_zeroVector, true)
+      } else {
+        if (releaseVelocity.length() > GRAB_LINEAR_SPEED_LIMIT) {
+          releaseVelocity.setLength(GRAB_LINEAR_SPEED_LIMIT)
+        }
+        activeGrab.body.setLinvel(vectorLike(releaseVelocity), true)
+        clampBodyVelocity(activeGrab.body)
       }
-      activeGrab.body.setLinvel(vectorLike(releaseVelocity), true)
-      clampBodyVelocity(activeGrab.body)
       activeGrab.body.wakeUp()
     }
 
@@ -183,13 +248,12 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
     activeGrabRef.current = null
     setActiveObjectIdSafe(null)
     markObjectInteraction()
-  }, [gl.domElement, removeJoint, setActiveObjectIdSafe])
+  }, [gl.domElement, setActiveObjectIdSafe])
 
   const beginGrab = useCallback(
     (objectId: string, handle: SceneObjectHandle, pointerId: number, clientX: number, clientY: number, worldPoint: THREE.Vector3) => {
       const body = handle.rigidBody
-      const anchor = anchorRef.current
-      if (!isBodyUsable(body) || !isBodyUsable(anchor)) return
+      if (!isBodyUsable(body)) return
 
       endGrab()
 
@@ -197,30 +261,31 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
       _raycaster.setFromCamera(pointerNdc, camera)
       const depth = Math.max(_grabDepthVector.copy(worldPoint).sub(_raycaster.ray.origin).dot(_raycaster.ray.direction), 0.1)
 
-      anchor.setTranslation(vectorLike(worldPoint), true)
-      anchor.setNextKinematicTranslation(vectorLike(worldPoint))
-      if (!clampBodyVelocity(body)) return
-      body.wakeUp()
+      // Held upright: the object's own placed orientation, keeping only its current
+      // heading. A vase knocked on its side comes back upright when picked up, and a
+      // palette placed lying flat stays flat. R / Shift+R turn it from there.
+      const restRotation = handle.initialRotation.clone()
+      const current = body.rotation()
+      const relative = new THREE.Quaternion(current.x, current.y, current.z, current.w)
+        .multiply(restRotation.clone().invert())
+      const yaw = twistAngleAboutUp(relative)
+      const targetRotation = uprightRotation(restRotation, yaw, new THREE.Quaternion())
 
-      const bodyAnchor = computeLocalAnchor(body, worldPoint)
-      try {
-        jointRef.current = world.createImpulseJoint(
-          rapier.JointData.spherical(_zeroVector, vectorLike(bodyAnchor)),
-          anchor,
-          body,
-          true,
-        )
-      } catch (error) {
-        console.warn(`Could not create grab joint for "${objectId}".`, error)
-        return
-      }
+      if (!clampBodyVelocity(body)) return
+      const localAnchor = computeLocalAnchor(body, worldPoint)
+      const gravityScale = body.gravityScale()
+      body.setGravityScale(0, true)
+      body.setAngvel(_zeroVector, true)
+      body.lockRotations(true, true)
+      body.wakeUp()
 
       try {
         if (!gl.domElement.hasPointerCapture(pointerId)) {
           gl.domElement.setPointerCapture(pointerId)
         }
       } catch {
-        removeJoint()
+        body.setGravityScale(gravityScale, true)
+        body.lockRotations(false, true)
         return
       }
 
@@ -233,10 +298,15 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
         target: worldPoint.clone(),
         previousTarget: worldPoint.clone(),
         releaseVelocity: new THREE.Vector3(),
+        restRotation,
+        yaw,
+        targetRotation,
+        localAnchor,
+        gravityScale,
       }
       setActiveObjectIdSafe(objectId)
     },
-    [anchorRef, camera, endGrab, gl.domElement, rapier.JointData, removeJoint, setActiveObjectIdSafe, world],
+    [camera, endGrab, gl.domElement, setActiveObjectIdSafe],
   )
 
   const getPointerTarget = useCallback(
@@ -255,10 +325,13 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
 
         const centerDistanceSq = centerDistanceSqToPointer(event, handle.getFocusPoint(_objectCenter), camera)
         const hitDistance = Number.isFinite(intersection.distance) ? intersection.distance : Number.POSITIVE_INFINITY
+        // The nearest grabbable object the ray hits -- what is under the cursor. It
+        // used to be whichever object's *centre* projected closest to the cursor,
+        // which could pick something behind: a click on the vase took the mug.
         if (
           !best ||
-          centerDistanceSq < best.centerDistanceSq ||
-          (centerDistanceSq === best.centerDistanceSq && hitDistance < best.hitDistance)
+          hitDistance < best.hitDistance ||
+          (hitDistance === best.hitDistance && centerDistanceSq < best.centerDistanceSq)
         ) {
           best = {
             objectId,
@@ -319,10 +392,8 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
 
   useBeforePhysicsStep((physicsWorld) => {
     const activeGrab = activeGrabRef.current
-    const anchor = anchorRef.current
     if (!activeGrab) return
-    if (!isBodyUsable(anchor) || !isBodyUsable(activeGrab.body)) {
-      removeJoint()
+    if (!isBodyUsable(activeGrab.body)) {
       activeGrabRef.current = null
       setActiveObjectIdSafe(null)
       return
@@ -335,20 +406,7 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
       activeGrab.releaseVelocity.setLength(GRAB_LINEAR_SPEED_LIMIT)
     }
     activeGrab.previousTarget.copy(activeGrab.target)
-    anchor.setNextKinematicTranslation(vectorLike(activeGrab.target))
-    clampBodyVelocity(activeGrab.body)
-  })
-
-  useAfterPhysicsStep(() => {
-    const activeGrab = activeGrabRef.current
-    if (!activeGrab) return
-    if (!isBodyUsable(activeGrab.body)) {
-      removeJoint()
-      activeGrabRef.current = null
-      setActiveObjectIdSafe(null)
-      return
-    }
-    clampBodyVelocity(activeGrab.body)
+    steerHeldBody(activeGrab, dt)
   })
 
   useEffect(() => {
@@ -371,13 +429,41 @@ export function useObjectGrab({ anchorRef, objectRefs, isObjectEligible }: UseOb
       }
     }
 
+    // While holding: the wheel moves the object along the view ray instead of
+    // zooming the camera. Captured on window, so it runs before the camera's own
+    // wheel handler on the canvas and can stop it.
+    const onWheel = (event: WheelEvent) => {
+      const activeGrab = activeGrabRef.current
+      if (!activeGrab) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      activeGrab.depth = THREE.MathUtils.clamp(
+        activeGrab.depth * Math.exp(-event.deltaY * GRAB_DEPTH_PER_WHEEL_PIXEL),
+        GRAB_DEPTH_MIN,
+        GRAB_DEPTH_MAX,
+      )
+    }
+
+    // While holding: R turns the object one step about the vertical, Shift+R back.
+    const onKeyDown = (event: KeyboardEvent) => {
+      const activeGrab = activeGrabRef.current
+      if (!activeGrab || event.code !== 'KeyR') return
+      event.preventDefault()
+      activeGrab.yaw += event.shiftKey ? -ROTATE_STEP : ROTATE_STEP
+      uprightRotation(activeGrab.restRotation, activeGrab.yaw, activeGrab.targetRotation)
+    }
+
     window.addEventListener('pointermove', onPointerMove, { capture: true, passive: false })
     window.addEventListener('pointerup', onPointerEnd, { capture: true, passive: false })
     window.addEventListener('pointercancel', onPointerEnd, { capture: true, passive: false })
+    window.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('pointermove', onPointerMove, { capture: true })
       window.removeEventListener('pointerup', onPointerEnd, { capture: true })
       window.removeEventListener('pointercancel', onPointerEnd, { capture: true })
+      window.removeEventListener('wheel', onWheel, { capture: true })
+      window.removeEventListener('keydown', onKeyDown)
       endGrab()
       mountedRef.current = false
     }

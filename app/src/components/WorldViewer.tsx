@@ -1,6 +1,6 @@
 import { Component, Suspense, useRef, useEffect, useState, type ReactNode } from 'react'
 import { Tooltip } from '@radix-ui/themes'
-import { ArrowsClockwiseIcon, CaretDownIcon, CaretUpIcon } from '@phosphor-icons/react'
+import { ArrowsClockwiseIcon, CaretDownIcon, CaretUpIcon } from '../icons'
 import { Canvas } from '@react-three/fiber'
 import { Physics } from '@react-three/rapier'
 import { SplatRenderer } from '../modules/splat/SplatRenderer'
@@ -16,8 +16,10 @@ import { OriginHelper } from '../modules/scene/OriginHelper'
 import { AudioManager } from '../modules/audio/AudioManager'
 import { PostProcessing } from '../modules/postprocessing/PostProcessing'
 import { DEFAULT_SHADOW_CATCHER_COLOR, DEFAULT_SHADOW_CATCHER_OPACITY, shadowCatcherColor, shadowCatcherOpacity } from '../modules/scene/shadows'
-import { getSplatUrl } from '../utils/worldLoader'
+import { getSplatPreviewUrl, getSplatUrl } from '../utils/worldLoader'
+import { LoadingOverlay } from './LoadingOverlay'
 import { useDebugStore } from '../store/debug'
+import { useLoadingStore } from '../store/loading'
 import { WorldRenderMode, ObjectRenderMode, ViewerQuality, type Vec3Tuple, type World, type WorldHoverPreview, type WorldObjectAsset, type WorldSceneProject } from '../types/world'
 import { AppButton } from './AppButton'
 import { chrome } from './AppChrome'
@@ -168,6 +170,11 @@ export function WorldViewer({
   }, [controllerResetToken])
 
   const splatUrl = desiredWorld ? getSplatUrl(desiredWorld) : ''
+  const splatPreviewUrl = desiredWorld ? getSplatPreviewUrl(desiredWorld) : ''
+  // Objects and the collider wait for the preview splat so it gets the
+  // bandwidth first and the room appears within a couple of seconds.
+  const splatPreviewShown = useLoadingStore((s) => s.splatUrl === splatUrl && (s.previewReady || s.fullReady))
+  const heavyAssetsReady = !splatUrl || !splatPreviewUrl || splatPreviewShown
   const { ground_plane_offset, flip_y, metric_scale_factor } = desiredWorld?.assets.splats.semantics_metadata ?? DEFAULT_WORLD_SEMANTICS
   const flipY = flip_y ?? true
   const baseMetricScaleFactor = metric_scale_factor ?? 1
@@ -241,7 +248,7 @@ export function WorldViewer({
             ) : (
               <CharacterController ref={charRef as React.RefObject<CharacterControllerHandle>} />
             )}
-            {showScene && colliderUrl && (
+            {heavyAssetsReady && showScene && colliderUrl && (
               <OptionalAssetBoundary label={colliderUrl} resetKey={colliderUrl}>
                 <Suspense fallback={null}>
                   <WorldCollider
@@ -255,7 +262,7 @@ export function WorldViewer({
                 </Suspense>
               </OptionalAssetBoundary>
             )}
-            {showObjects && !editing && (
+            {heavyAssetsReady && showObjects && !editing && (
               <Suspense fallback={null}>
                 <ObjectGrid
                   objects={objectPhysicsAssets}
@@ -263,7 +270,7 @@ export function WorldViewer({
                 />
               </Suspense>
             )}
-            {showObjects && editing && (
+            {heavyAssetsReady && showObjects && editing && (
               <Suspense fallback={null}>
                 <PlacementEditorScene controller={placementEditor} renderMode={objectRenderMode} />
               </Suspense>
@@ -276,6 +283,7 @@ export function WorldViewer({
             <OptionalAssetBoundary label={splatUrl} resetKey={splatUrl}>
               <SplatRenderer
                 url={splatUrl}
+                previewUrl={splatPreviewUrl}
                 visible={showSplat}
                 groundPlaneOffset={activeGroundPlaneOffset}
                 flipY={flipY}
@@ -298,7 +306,7 @@ export function WorldViewer({
             shadow-camera-top={20}
             shadow-camera-bottom={-20}
           />
-          {panoUrl && (
+          {panoUrl && heavyAssetsReady && (
             <OptionalAssetBoundary label={panoUrl} resetKey={panoUrl} fallback={<DefaultEnvironment intensity={activeEnvironmentIntensity} />}>
               <Suspense fallback={null}>
                 <EnvironmentMap panoUrl={panoUrl} intensity={activeEnvironmentIntensity} />
@@ -311,6 +319,12 @@ export function WorldViewer({
           {isHighQuality && <PostProcessing />}
         </Suspense>
       </Canvas>
+      <LoadingOverlay
+        key={`${desiredSlug}:${splatUrl}`}
+        title={desiredSlug.split('-').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
+        hasSplat={Boolean(splatUrl)}
+        hasPreview={Boolean(splatPreviewUrl)}
+      />
       {uiVisible && (
         <SourceImageControls
           activeSourceImageUrl={activePreviewImageUrl}

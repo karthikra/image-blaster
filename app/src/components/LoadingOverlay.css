@@ -1,0 +1,318 @@
+/* Loading overlay: a dotted "splat" attic that assembles face by face as the
+   world streams in, then hands over to a small pill while it refines. */
+
+.ld-screen {
+  --amber: 255, 190, 120;
+  --teal: 120, 220, 230;
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  place-items: center;
+  padding: 0 16px 9vh;
+  overflow: hidden;
+  color: #f4ece2;
+  background:
+    radial-gradient(60% 50% at 50% 42%, rgba(var(--amber), 0.10), transparent 70%),
+    radial-gradient(120% 90% at 50% 110%, #1b1410 0%, #0b0908 55%, #050404 100%);
+  transition: opacity 700ms ease, visibility 0s linear 0s;
+}
+.ld-screen.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 900ms ease, visibility 0s linear 900ms;
+}
+
+/* drifting dust motes, lit by the window */
+.ld-dust,
+.ld-dust::before,
+.ld-dust::after {
+  position: absolute;
+  inset: -20% 0 0;
+  pointer-events: none;
+  background-repeat: repeat;
+  animation: ld-drift 18s linear infinite;
+}
+.ld-dust {
+  background-image:
+    radial-gradient(1.5px 1.5px at 12% 30%, rgba(var(--amber), 0.55), transparent 60%),
+    radial-gradient(1px 1px at 68% 72%, rgba(var(--amber), 0.40), transparent 60%),
+    radial-gradient(1.2px 1.2px at 40% 88%, rgba(var(--teal), 0.30), transparent 60%);
+  background-size: 260px 260px;
+}
+.ld-dust::before {
+  content: "";
+  background-image:
+    radial-gradient(1px 1px at 22% 64%, rgba(var(--amber), 0.45), transparent 60%),
+    radial-gradient(1.6px 1.6px at 82% 18%, rgba(var(--amber), 0.30), transparent 60%);
+  background-size: 180px 180px;
+  animation-duration: 26s;
+}
+.ld-dust::after {
+  content: "";
+  background-image: radial-gradient(2px 2px at 50% 50%, rgba(var(--amber), 0.18), transparent 60%);
+  background-size: 340px 340px;
+  animation-duration: 34s;
+  filter: blur(1px);
+}
+@keyframes ld-drift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-40px, -260px, 0); }
+}
+
+/* ---- the room ---- */
+.ld-stage {
+  position: relative;
+  width: 240px;
+  height: 240px;
+  perspective: 900px;
+  align-self: end;
+  margin-bottom: 28px;
+}
+.ld-room {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  animation: ld-turn 16s linear infinite;
+}
+@keyframes ld-turn {
+  from { transform: rotateX(-24deg) rotateY(0deg); }
+  to { transform: rotateX(-24deg) rotateY(360deg); }
+}
+
+.ld-face {
+  --fly: -150px;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 180px;
+  height: 120px;
+  margin: -60px 0 0 -90px;
+  border: 1px solid rgba(var(--amber), 0.45);
+  background-color: rgba(var(--amber), 0.035);
+  background-image: radial-gradient(circle, rgba(var(--amber), 0.9) 0 1px, transparent 1.6px);
+  background-size: 9px 9px;
+  box-shadow: inset 0 0 24px rgba(var(--amber), 0.10), 0 0 18px rgba(var(--amber), 0.06);
+  opacity: 0;
+  backface-visibility: visible;
+  transition:
+    opacity 600ms ease,
+    transform 1100ms cubic-bezier(0.16, 0.9, 0.2, 1);
+}
+.ld-face.is-on { --fly: 0px; opacity: 1; }
+.ld-face::after {
+  /* a scan line sweeping each face, like splats resolving */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(var(--amber), 0.28) 50%, transparent 70%);
+  background-size: 250% 100%;
+  animation: ld-scan 2.8s ease-in-out infinite;
+  mix-blend-mode: screen;
+}
+@keyframes ld-scan {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+
+.ld-floor { width: 180px; height: 180px; margin: -90px 0 0 -90px; transform: rotateX(90deg) translateZ(-60px) translateZ(var(--fly)); }
+.ld-back { transform: translateZ(-90px) translateZ(var(--fly)); }
+.ld-left { transform: rotateY(90deg) translateZ(-90px) translateZ(var(--fly)); }
+.ld-right { transform: rotateY(-90deg) translateZ(-90px) translateZ(var(--fly)); }
+/* gable: each slope runs from a wall top (x +-90, y -60) to the ridge (0, -120) */
+.ld-roof-left,
+.ld-roof-right {
+  --fly: 150px;
+  width: 108px;
+  height: 180px;
+  margin: -90px 0 0 -54px;
+  border-color: rgba(var(--teal), 0.40);
+  background-image: radial-gradient(circle, rgba(var(--teal), 0.75) 0 1px, transparent 1.6px);
+}
+.ld-roof-left { transform: translate3d(-45px, -90px, 0) rotateZ(-33.7deg) rotateX(90deg) translateZ(var(--fly)); }
+.ld-roof-right { transform: translate3d(45px, -90px, 0) rotateZ(33.7deg) rotateX(90deg) translateZ(var(--fly)); }
+.ld-face.ld-roof-left.is-on,
+.ld-face.ld-roof-right.is-on { --fly: 0px; }
+
+.ld-window {
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  width: 62px;
+  height: 56px;
+  margin-left: -31px;
+  border: 1px solid rgba(var(--amber), 0.9);
+  background:
+    linear-gradient(90deg, transparent 48%, rgba(var(--amber), 0.9) 48% 52%, transparent 52%),
+    linear-gradient(0deg, transparent 48%, rgba(var(--amber), 0.9) 48% 52%, transparent 52%),
+    rgba(var(--amber), calc(0.15 + var(--p, 0) * 0.55));
+  box-shadow: 0 0 calc(10px + var(--p, 0) * 40px) rgba(var(--amber), calc(0.25 + var(--p, 0) * 0.5));
+}
+
+.ld-floor-glow {
+  position: absolute;
+  left: 50%;
+  bottom: -10px;
+  width: 320px;
+  height: 60px;
+  margin-left: -160px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(var(--amber), 0.20), transparent);
+  filter: blur(6px);
+  animation: ld-breathe 3.2s ease-in-out infinite;
+}
+@keyframes ld-breathe {
+  50% { opacity: 0.55; transform: scaleX(0.9); }
+}
+
+/* ---- copy ---- */
+.ld-copy {
+  width: min(420px, 100%);
+  text-align: center;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.ld-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(var(--amber), 0.85);
+}
+.ld-title {
+  margin-top: 6px;
+  font-size: clamp(22px, 3.4vw, 30px);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+.ld-meter {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+}
+.ld-percent {
+  min-width: 3.4ch;
+  text-align: right;
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ld-percent small { font-size: 13px; font-weight: 600; opacity: 0.6; margin-left: 1px; }
+.ld-bar,
+.ld-pill-bar {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+.ld-bar > span,
+.ld-pill-bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(var(--teal, 120, 220, 230), 0.9), rgb(255, 190, 120));
+  box-shadow: 0 0 12px rgba(255, 190, 120, 0.6);
+  transition: width 400ms ease;
+}
+.ld-bar > span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  background-size: 60px 100%;
+  background-repeat: no-repeat;
+  animation: ld-shimmer 1.4s linear infinite;
+}
+@keyframes ld-shimmer {
+  from { background-position: -60px 0; }
+  to { background-position: calc(100% + 60px) 0; }
+}
+.ld-detail {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: rgba(244, 236, 226, 0.62);
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+}
+.ld-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: rgba(var(--teal), 0.7);
+}
+.ld-item {
+  margin-top: 6px;
+  font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  color: rgba(244, 236, 226, 0.35);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- pill shown while the preview is up and the rest refines ---- */
+.ld-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(300px, calc(100% - 32px));
+  padding: 9px 14px 9px 10px;
+  border-radius: 99px;
+  color: #f4ece2;
+  font: 500 12.5px/1 Inter, system-ui, sans-serif;
+  background: rgba(14, 11, 9, 0.72);
+  border: 1px solid rgba(255, 190, 120, 0.22);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  transform: translate(-50%, 0);
+  transition: opacity 500ms ease, transform 500ms cubic-bezier(0.2, 0.9, 0.2, 1), visibility 0s linear 0s;
+}
+.ld-pill.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 14px);
+  transition: opacity 500ms ease, transform 500ms ease, visibility 0s linear 500ms;
+}
+.ld-pill-text { display: flex; gap: 6px; white-space: nowrap; }
+.ld-pill-text b { font-weight: 700; font-variant-numeric: tabular-nums; color: rgb(255, 190, 120); }
+.ld-pill-bar { height: 3px; }
+
+.ld-mini {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  transform-style: preserve-3d;
+  animation: ld-mini 2.4s cubic-bezier(0.6, 0, 0.4, 1) infinite;
+}
+.ld-mini i {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid rgb(255, 190, 120);
+  border-radius: 3px;
+}
+.ld-mini i:nth-child(2) { transform: rotateY(90deg); border-color: rgba(120, 220, 230, 0.85); }
+.ld-mini i:nth-child(3) { transform: rotateX(90deg); opacity: 0.6; }
+@keyframes ld-mini {
+  from { transform: rotateX(-25deg) rotateY(0deg); }
+  to { transform: rotateX(-25deg) rotateY(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ld-room,
+  .ld-mini,
+  .ld-dust,
+  .ld-dust::before,
+  .ld-dust::after,
+  .ld-face::after,
+  .ld-floor-glow,
+  .ld-bar > span::after { animation: none; }
+  .ld-room { transform: rotateX(-24deg) rotateY(-32deg); }
+}

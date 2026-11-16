@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Tooltip } from '@radix-ui/themes'
-import { ArrowCounterClockwise, ButterflyIcon, CheckSquareIcon, FileTextIcon, FolderOpenIcon, GlobeHemisphereWestIcon, ImageSquareIcon, ListIcon, PencilSimpleIcon, PersonIcon, QuestionMarkIcon, SpeakerHigh, SpeakerSlash, SquareIcon, TerminalWindowIcon } from '@phosphor-icons/react'
+import { ArrowCounterClockwise, ButterflyIcon, CheckSquareIcon, FileTextIcon, FolderOpenIcon, GlobeHemisphereWestIcon, ImageSquareIcon, ListIcon, PencilSimpleIcon, PersonIcon, QuestionMarkIcon, SpeakerHigh, SpeakerSlash, SquareIcon, TerminalWindowIcon } from '../icons'
 import { useLocation } from 'wouter'
 import type { WorldEntry, WorldHoverPreview, WorldObjectAsset, WorldSceneProject } from '../types/world'
 import { type ControllerMode, useDebugStore } from '../store/debug'

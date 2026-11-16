@@ -20,6 +20,13 @@ interface Props {
 
 const ignoreRaycast: THREE.Object3D['raycast'] = () => {}
 
+// The shadow catcher and Spark's splats are both transparent, so three.js orders
+// them by the distance from the camera to each object's origin -- and both origins
+// sit at the capture point, right where the camera stands. Turning the camera
+// flipped that order, and whenever the splats drew last they painted over the
+// shadows. A higher renderOrder always draws the shadows after the splats.
+const SHADOW_CATCHER_RENDER_ORDER = 2
+
 export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor, shadowOpacity, shadowColor }: Props) {
   const { scene: rawScene } = useGLTF(url)
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
@@ -73,6 +80,7 @@ export function WorldCollider({ url, flipY, groundPlaneOffset, metricScaleFactor
       child.material = isShadowCatcher ? shadowMat
         : objectRenderMode === ObjectRenderMode.ShadedWireframe ? shadedMaterial
         : wireframeMaterial
+      child.renderOrder = isShadowCatcher ? SHADOW_CATCHER_RENDER_ORDER : 0
       child.material.needsUpdate = true
     })
   }, [scene, showMesh, objectRenderMode, wireframeMaterial, shadedMaterial, shadowMat])

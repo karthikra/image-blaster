@@ -1,0 +1,42 @@
+// The icons this app uses, imported one module each.
+//
+// Importing from '@phosphor-icons/react' itself makes the dev server evaluate
+// the whole library -- every icon in every weight -- which blocked the main
+// thread for ~1.9 s on each page load. A production build tree-shakes it; the
+// dev server does not. Add an icon here before using it.
+
+export { ArrowClockwise } from '@phosphor-icons/react/dist/csr/ArrowClockwise'
+export { ArrowCounterClockwise } from '@phosphor-icons/react/dist/csr/ArrowCounterClockwise'
+export { ArrowDown } from '@phosphor-icons/react/dist/csr/ArrowDown'
+export { ArrowLeft } from '@phosphor-icons/react/dist/csr/ArrowLeft'
+export { ArrowUUpLeft } from '@phosphor-icons/react/dist/csr/ArrowUUpLeft'
+export { ArrowUUpRight } from '@phosphor-icons/react/dist/csr/ArrowUUpRight'
+export { ArrowsClockwiseIcon } from '@phosphor-icons/react/dist/csr/ArrowsClockwise'
+export { ArrowsOutCardinal } from '@phosphor-icons/react/dist/csr/ArrowsOutCardinal'
+export { ButterflyIcon } from '@phosphor-icons/react/dist/csr/Butterfly'
+export { CaretDownIcon } from '@phosphor-icons/react/dist/csr/CaretDown'
+export { CaretUpIcon } from '@phosphor-icons/react/dist/csr/CaretUp'
+export { CheckSquareIcon } from '@phosphor-icons/react/dist/csr/CheckSquare'
+export { Copy } from '@phosphor-icons/react/dist/csr/Copy'
+export { CornersOut } from '@phosphor-icons/react/dist/csr/CornersOut'
+export { Cube, CubeIcon } from '@phosphor-icons/react/dist/csr/Cube'
+export { FileTextIcon } from '@phosphor-icons/react/dist/csr/FileText'
+export { FloppyDisk } from '@phosphor-icons/react/dist/csr/FloppyDisk'
+export { FolderOpen, FolderOpenIcon } from '@phosphor-icons/react/dist/csr/FolderOpen'
+export { GlobeHemisphereEast } from '@phosphor-icons/react/dist/csr/GlobeHemisphereEast'
+export { GlobeHemisphereWestIcon } from '@phosphor-icons/react/dist/csr/GlobeHemisphereWest'
+export { GlobeSimple } from '@phosphor-icons/react/dist/csr/GlobeSimple'
+export { ImageSquareIcon } from '@phosphor-icons/react/dist/csr/ImageSquare'
+export { ListIcon } from '@phosphor-icons/react/dist/csr/List'
+export { MountainsIcon } from '@phosphor-icons/react/dist/csr/Mountains'
+export { ParkIcon } from '@phosphor-icons/react/dist/csr/Park'
+export { PencilSimpleIcon } from '@phosphor-icons/react/dist/csr/PencilSimple'
+export { PersonIcon } from '@phosphor-icons/react/dist/csr/Person'
+export { Plus } from '@phosphor-icons/react/dist/csr/Plus'
+export { QuestionMarkIcon } from '@phosphor-icons/react/dist/csr/QuestionMark'
+export { SpeakerHigh } from '@phosphor-icons/react/dist/csr/SpeakerHigh'
+export { SpeakerSlash } from '@phosphor-icons/react/dist/csr/SpeakerSlash'
+export { Sphere } from '@phosphor-icons/react/dist/csr/Sphere'
+export { SquareIcon } from '@phosphor-icons/react/dist/csr/Square'
+export { TerminalWindowIcon } from '@phosphor-icons/react/dist/csr/TerminalWindow'
+export { Trash } from '@phosphor-icons/react/dist/csr/Trash'

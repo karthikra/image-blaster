@@ -1,6 +1,5 @@
 import { Component, createRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { ThreeEvent, useFrame, useThree } from '@react-three/fiber'
-import { RigidBody, type RapierRigidBody } from '@react-three/rapier'
 import * as THREE from 'three'
 import type { WorldObjectAsset, WorldObjectPhysics, WorldObjectPlacement } from '../../types/world'
 import { useDebugStore } from '../../store/debug'
@@ -140,7 +139,6 @@ export function ObjectGrid({ objects, placements }: Props) {
   const objectRenderMode = useDebugStore((s) => s.objectRenderMode)
   const objectResetToken = useDebugStore((s) => s.objectResetToken)
   const objectRefs = useRef(new Map<string, RefObject<SceneObjectHandle | null>>())
-  const anchorRef = useRef<RapierRigidBody>(null)
   const anchorSphereRef = useRef<THREE.Mesh>(null)
   const grabbableObjectIds = useMemo(
     () => new Set(renderedObjects.filter((object) => object.physics === 'rigidbody').map((object) => object.instanceId)),
@@ -148,10 +146,23 @@ export function ObjectGrid({ objects, placements }: Props) {
   )
   const isObjectEligible = useCallback((objectId: string) => grabbableObjectIds.has(objectId), [grabbableObjectIds])
   const { activeObjectId, onPointerDown, resetObjects, activeGrabRef, cancelGrab } = useObjectGrab({
-    anchorRef,
     objectRefs,
     isObjectEligible,
   })
+
+  // Stable per-instance props, so SceneObject's memo holds across hover and grab
+  // state changes instead of every object re-rendering.
+  const instanceAssets = useMemo(
+    () => new Map(renderedObjects.map((object) => [object.instanceId, { ...object.asset, id: object.instanceId }])),
+    [renderedObjects],
+  )
+  const pointerDownHandlers = useMemo(
+    () => new Map(renderedObjects.map((object) => [
+      object.instanceId,
+      (event: ThreeEvent<PointerEvent>) => onPointerDown(object.instanceId, event),
+    ])),
+    [onPointerDown, renderedObjects],
+  )
 
   useLayoutEffect(() => {
     const objectIds = new Set([
@@ -210,11 +221,13 @@ export function ObjectGrid({ objects, placements }: Props) {
     const sphere = anchorSphereRef.current
     if (sphere) {
       const grab = activeGrabRef.current
+      // Always in the scene, scaled to nothing when idle: hidden until the first
+      // grab, its shader compiled at that moment and stalled the frame ~300 ms.
       if (grab) {
         sphere.position.copy(grab.target)
-        sphere.visible = true
+        sphere.scale.setScalar(1)
       } else {
-        sphere.visible = false
+        sphere.scale.setScalar(0)
       }
     }
   })
@@ -223,8 +236,7 @@ export function ObjectGrid({ objects, placements }: Props) {
 
   return (
     <>
-      <RigidBody ref={anchorRef} type="kinematicPosition" colliders={false} position={[0, -1000, 0]} />
-      <mesh ref={anchorSphereRef} visible={false} renderOrder={10000}>
+      <mesh ref={anchorSphereRef} scale={0} renderOrder={10000}>
         <sphereGeometry args={[0.025, 10, 10]} />
         <meshBasicMaterial color={0xffffff} depthTest={false} depthWrite={false} toneMapped={false} transparent />
       </mesh>
@@ -233,14 +245,14 @@ export function ObjectGrid({ objects, placements }: Props) {
           <SceneObject
             ref={getObjectRef(object.instanceId)}
             key={`${object.instanceId}:${object.asset.assetId}:${object.position.join(',')}:${object.rotation.join(',')}:${object.scale.join(',')}:${object.physics}`}
-            object={{ ...object.asset, id: object.instanceId }}
+            object={instanceAssets.get(object.instanceId)!}
             position={object.position}
             rotation={object.rotation}
             scale={object.scale}
             physics={object.physics}
             renderMode={objectRenderMode}
             onHover={handleHover}
-            onPointerDown={(event) => onPointerDown(object.instanceId, event)}
+            onPointerDown={pointerDownHandlers.get(object.instanceId)}
           />
         </ObjectLoadErrorBoundary>
       ))}

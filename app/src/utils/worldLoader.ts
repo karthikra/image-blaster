@@ -21,3 +21,11 @@ export function getSplatUrl(world: World): string {
   const urls = world.assets.splats.spz_urls
   return localWorldAssetUrl(urls.full_res)
 }
+
+// A small LOD shown while the full splat streams in: Marble's 100k level is
+// ~1.3 MB against ~29 MB, so the room appears in a second or two.
+export function getSplatPreviewUrl(world: World): string {
+  const urls = world.assets.splats.spz_urls
+  const preview = localWorldAssetUrl(urls['100k'] ?? urls['150k'])
+  return preview && preview !== getSplatUrl(world) ? preview : ''
+}

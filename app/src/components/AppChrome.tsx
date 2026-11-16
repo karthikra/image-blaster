@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Cube } from '@phosphor-icons/react'
+import { Cube } from '../icons'
 import { twMerge } from 'tailwind-merge'
 
 export const chrome = {

@@ -17,7 +17,7 @@ import {
   Cube,
   GlobeSimple,
   Plus,
-} from '@phosphor-icons/react'
+} from '../../icons'
 import * as THREE from 'three'
 import { AppButton } from '../../components/AppButton'
 import { ChromePanel, ChromeThumbnail, chrome } from '../../components/AppChrome'
