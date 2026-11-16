@@ -141,7 +141,8 @@ export function ObjectGrid({ objects, placements }: Props) {
   const objectRefs = useRef(new Map<string, RefObject<SceneObjectHandle | null>>())
   const anchorSphereRef = useRef<THREE.Mesh>(null)
   const grabbableObjectIds = useMemo(
-    () => new Set(renderedObjects.filter((object) => object.physics === 'rigidbody').map((object) => object.instanceId)),
+    // Props are picked up; furniture ('static', kinematic) is slid along the floor.
+    () => new Set(renderedObjects.filter((object) => object.physics === 'rigidbody' || object.physics === 'static').map((object) => object.instanceId)),
     [renderedObjects],
   )
   const isObjectEligible = useCallback((objectId: string) => grabbableObjectIds.has(objectId), [grabbableObjectIds])

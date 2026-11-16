@@ -82,7 +82,17 @@ export interface SceneObjectHandle {
   bounds: THREE.Box3
   getFocusPoint: (target: THREE.Vector3) => THREE.Vector3
   playInteractionSfx: () => void
+  /** Distance to the model's own surface along `raycaster`, or null on a miss. */
+  raycastModel: (raycaster: THREE.Raycaster) => number | null
+  /** Furniture only: a box in the body's frame used to stop a slide at walls and
+   * other furniture. It starts PROBE_LIFT_M above the base so the floor it
+   * stands on never counts. */
+  probe: { halfExtents: THREE.Vector3; center: THREE.Vector3 }
 }
+
+const PROBE_LIFT_M = 0.15
+/** The probe is a little narrower than the object, so touching is not hitting. */
+const PROBE_INSET = 0.9
 
 interface Props {
   object: WorldObjectAsset
@@ -127,7 +137,9 @@ export const SceneObject = memo(forwardRef<SceneObjectHandle, Props>(function Sc
   const camera = useThree((state) => state.camera)
   const lastSfxIndexRef = useRef<number | null>(null)
   const muted = useAudioStore((s) => s.muted)
-  const isStatic = physics === 'static' || physics === 'ghost'
+  // 'static' is furniture: kinematic, so it keeps its exact (concave) collision
+  // mesh and can still be slid when grabbed. 'ghost' never moves or collides.
+  const bodyType = physics === 'ghost' ? 'fixed' : physics === 'static' ? 'kinematicPosition' : 'dynamic'
   const hasCollider = physics === 'rigidbody' || physics === 'static'
   const initialPosition = useMemo(() => new THREE.Vector3(...position), [position])
   const initialRotation = useMemo(() => new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotation)), [rotation])
@@ -281,8 +293,30 @@ export const SceneObject = memo(forwardRef<SceneObjectHandle, Props>(function Sc
         return target.copy(initialPosition).add(colliderCenter)
       },
       playInteractionSfx: playRandomSfx,
+      raycastModel: (raycaster) => {
+        // The visual meshes opt out of raycasting (hover runs every pointer move),
+        // so this calls Mesh.raycast directly -- only on a click.
+        const group = visualGroupRef.current
+        if (!group) return null
+        group.updateWorldMatrix(true, true)
+        const hits: THREE.Intersection[] = []
+        group.traverse((child) => {
+          if (child instanceof THREE.Mesh && child.visible) THREE.Mesh.prototype.raycast.call(child, raycaster, hits)
+        })
+        return hits.length ? Math.min(...hits.map((h) => h.distance)) : null
+      },
+      probe: (() => {
+        const hx = colliderHalfExtents.x * scale[0]
+        const hy = colliderHalfExtents.y * scale[1]
+        const hz = colliderHalfExtents.z * scale[2]
+        const lift = Math.min(PROBE_LIFT_M, hy)
+        return {
+          halfExtents: new THREE.Vector3(hx * PROBE_INSET, Math.max(hy - lift / 2, 0.01), hz * PROBE_INSET),
+          center: new THREE.Vector3(0, hy + lift / 2, 0),
+        }
+      })(),
     }),
-    [bounds, colliderCenter, initialPosition, initialRotation, object.id, playRandomSfx],
+    [bounds, colliderCenter, colliderHalfExtents, initialPosition, initialRotation, object.id, playRandomSfx, scale],
   )
 
   const visualContent = (
@@ -297,14 +331,14 @@ export const SceneObject = memo(forwardRef<SceneObjectHandle, Props>(function Sc
   return (
     <RigidBody
       ref={rigidBodyRef}
-      type={isStatic ? 'fixed' : 'dynamic'}
+      type={bodyType}
       colliders={false}
       position={position}
       rotation={rotation}
       linearDamping={0.45}
       angularDamping={0.35}
       additionalSolverIterations={4}
-      ccd
+      ccd={bodyType === 'dynamic'}
       canSleep
     >
       {hasCollider && hullPoints && (

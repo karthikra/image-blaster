@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { ThreeEvent, useThree } from '@react-three/fiber'
-import { type RapierRigidBody, useBeforePhysicsStep } from '@react-three/rapier'
+import { type RapierRigidBody, useBeforePhysicsStep, useRapier } from '@react-three/rapier'
 import * as THREE from 'three'
 import { markObjectInteraction } from '../interaction/pointerGuards'
 import { SCENE_OBJECT_INSTANCE_ID_KEY, type SceneObjectHandle } from './SceneObject'
@@ -25,6 +25,18 @@ const GRAB_DEPTH_MIN = 0.3
 const GRAB_DEPTH_MAX = 10
 const GRAB_DEPTH_PER_WHEEL_PIXEL = 0.0008  // ~10% per 120-pixel wheel notch
 const UP = new THREE.Vector3(0, 1, 0)
+/** Heavier than this (Rapier mass: hull volume in m^3 at density 1, so ~60
+ * litres), an object is furniture: grabbing it slides it along the floor with
+ * gravity on, instead of lifting it into the air. */
+const HEAVY_MASS = 0.06
+/** Furniture (kinematic) closes this fraction of the gap to the cursor per step,
+ * no faster than KINEMATIC_SPEED. */
+const KINEMATIC_GAIN = 0.5
+const KINEMATIC_SPEED = 3
+/** Furniture stops this far short of what it would hit. */
+const SLIDE_SKIN_M = 0.01
+/** A turn is refused if a probe this much smaller would hit something. */
+const TURN_PROBE_INSET = 0.85
 
 type ObjectRefMap = Map<string, RefObject<SceneObjectHandle | null>>
 
@@ -50,8 +62,14 @@ interface ActiveGrab {
   targetRotation: THREE.Quaternion
   /** The grabbed point, in the body's own frame. */
   localAnchor: THREE.Vector3
-  /** Restored on release; gravity is off while the object is held. */
+  /** Restored on release; gravity is off while a light object is held. */
   gravityScale: number
+  /** Furniture: dragged across the floor at the grabbed point's height. */
+  slide: boolean
+  slideHeight: number
+  /** Kinematic furniture is moved directly, checked against walls and furniture. */
+  kinematic: boolean
+  probe: SceneObjectHandle['probe']
 }
 
 /** The part of `relative` that is a turn about the world vertical (swing-twist). */
@@ -170,6 +188,8 @@ function steerHeldBody(grab: ActiveGrab, dt: number) {
   _grabPoint.set(translation.x, translation.y, translation.z).add(_leverArm)
   _pointVelocity.copy(grab.target).sub(_grabPoint).multiplyScalar(HOLD_LINEAR_GAIN / dt)
   if (_pointVelocity.length() > HOLD_LINEAR_SPEED_LIMIT) _pointVelocity.setLength(HOLD_LINEAR_SPEED_LIMIT)
+  // Sliding furniture leaves vertical motion to gravity and the floor.
+  if (grab.slide) _pointVelocity.y = body.linvel().y
   body.setLinvel(vectorLike(_pointVelocity), true)
   body.setAngvel(_zeroVector, true)
 }
@@ -199,6 +219,7 @@ function clampBodyVelocity(body: RapierRigidBody) {
 
 export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArgs) {
   const { camera, gl } = useThree()
+  const { world, rapier } = useRapier()
   const [activeObjectId, setActiveObjectId] = useState<string | null>(null)
   const activeGrabRef = useRef<ActiveGrab | null>(null)
   const mountedRef = useRef(true)
@@ -210,7 +231,16 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
   const updatePointerTarget = useCallback(
     (grab: ActiveGrab) => {
       _raycaster.setFromCamera(grab.pointerNdc, camera)
-      grab.target.copy(_raycaster.ray.origin).addScaledVector(_raycaster.ray.direction, grab.depth)
+      const { origin, direction } = _raycaster.ray
+      if (grab.slide) {
+        // Where the pointer ray meets the plane the grabbed point slides in. A ray
+        // at or above the horizon never meets it; keep the last target.
+        if (direction.y >= -1e-3) return
+        const t = Math.min((grab.slideHeight - origin.y) / direction.y, GRAB_DEPTH_MAX)
+        if (t > 0) grab.target.copy(origin).addScaledVector(direction, t)
+        return
+      }
+      grab.target.copy(origin).addScaledVector(direction, grab.depth)
     },
     [camera],
   )
@@ -219,7 +249,7 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
     const activeGrab = activeGrabRef.current
     if (!activeGrab) return
 
-    if (isBodyUsable(activeGrab.body)) {
+    if (isBodyUsable(activeGrab.body) && !activeGrab.kinematic) {
       activeGrab.body.setGravityScale(activeGrab.gravityScale, true)
       activeGrab.body.lockRotations(false, true)
       const releaseVelocity = activeGrab.releaseVelocity.clone()
@@ -271,21 +301,27 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
       const yaw = twistAngleAboutUp(relative)
       const targetRotation = uprightRotation(restRotation, yaw, new THREE.Quaternion())
 
-      if (!clampBodyVelocity(body)) return
+      const kinematic = body.isKinematic()
+      if (!kinematic && !clampBodyVelocity(body)) return
       const localAnchor = computeLocalAnchor(body, worldPoint)
       const gravityScale = body.gravityScale()
-      body.setGravityScale(0, true)
-      body.setAngvel(_zeroVector, true)
-      body.lockRotations(true, true)
-      body.wakeUp()
+      const slide = kinematic || body.mass() >= HEAVY_MASS
+      if (!kinematic) {
+        if (!slide) body.setGravityScale(0, true)
+        body.setAngvel(_zeroVector, true)
+        body.lockRotations(true, true)
+        body.wakeUp()
+      }
 
       try {
         if (!gl.domElement.hasPointerCapture(pointerId)) {
           gl.domElement.setPointerCapture(pointerId)
         }
       } catch {
-        body.setGravityScale(gravityScale, true)
-        body.lockRotations(false, true)
+        if (!kinematic) {
+          body.setGravityScale(gravityScale, true)
+          body.lockRotations(false, true)
+        }
         return
       }
 
@@ -303,6 +339,10 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
         targetRotation,
         localAnchor,
         gravityScale,
+        slide,
+        slideHeight: worldPoint.y,
+        kinematic,
+        probe: handle.probe,
       }
       setActiveObjectIdSafe(objectId)
     },
@@ -343,7 +383,26 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
         }
       }
 
-      if (best) return best
+      // Boxes overlap -- the monstera's encloses the vase beside it -- so among the
+      // objects whose box the ray entered, take the one whose model it hits first.
+      if (best) {
+        _raycaster.setFromCamera(event.pointer, camera)
+        let modelBest: { target: PointerTarget; distance: number } | null = null
+        for (const intersection of event.intersections) {
+          const objectId = objectIdFromIntersectionObject(intersection.object)
+          if (!objectId || (isObjectEligible && !isObjectEligible(objectId))) continue
+          const handle = objectRefs.current.get(objectId)?.current
+          if (!handle || !isBodyUsable(handle.rigidBody)) continue
+          const distance = handle.raycastModel(_raycaster)
+          if (distance === null || (modelBest && distance >= modelBest.distance)) continue
+          const point = _raycaster.ray.at(distance, new THREE.Vector3())
+          modelBest = {
+            distance,
+            target: { objectId, handle, point, centerDistanceSq: 0, hitDistance: distance },
+          }
+        }
+        return modelBest?.target ?? best
+      }
       if (isObjectEligible && !isObjectEligible(fallbackObjectId)) return null
 
       const fallbackHandle = objectRefs.current.get(fallbackObjectId)?.current
@@ -390,6 +449,96 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
     }
   }, [endGrab, objectRefs])
 
+  const probeShape = useCallback((grab: ActiveGrab, inset = 1) => {
+    const { halfExtents } = grab.probe
+    return new rapier.Cuboid(halfExtents.x * inset, halfExtents.y * inset, halfExtents.z * inset)
+  }, [rapier])
+
+  /**
+   * How much of `delta` furniture can travel before its probe meets a wall or
+   * other furniture, as a fraction 0..1. A shape cast that ignores contacts the
+   * motion is leaving, so a desk standing against a wall can slide along it or
+   * away from it, but not into it. (Asking "does it overlap anything new" fails:
+   * the whole room is one collider, which the desk touches from the start.)
+   */
+  const travelFraction = useCallback((grab: ActiveGrab, position: THREE.Vector3, rotation: THREE.Quaternion, delta: THREE.Vector3) => {
+    const at = grab.probe.center.clone().applyQuaternion(rotation).add(position)
+    const hit = world.castShape(
+      vectorLike(at), quaternionLike(rotation), vectorLike(delta), probeShape(grab), SLIDE_SKIN_M, 1, false,
+      rapier.QueryFilterFlags.EXCLUDE_DYNAMIC | rapier.QueryFilterFlags.EXCLUDE_SENSORS,
+      undefined, undefined, grab.body,
+    )
+    return hit ? Math.max(0, hit.time_of_impact) : 1
+  }, [probeShape, rapier, world])
+
+  /** True when a turned pose would put a (slightly smaller) probe into a wall or furniture. */
+  const turnBlocked = useCallback((grab: ActiveGrab, position: THREE.Vector3, rotation: THREE.Quaternion) => {
+    const at = grab.probe.center.clone().applyQuaternion(rotation).add(position)
+    return world.intersectionWithShape(
+      vectorLike(at), quaternionLike(rotation), probeShape(grab, TURN_PROBE_INSET),
+      rapier.QueryFilterFlags.EXCLUDE_DYNAMIC | rapier.QueryFilterFlags.EXCLUDE_SENSORS,
+      undefined, undefined, grab.body,
+    ) !== null
+  }, [probeShape, rapier, world])
+
+  /** Height of whatever is under (x, z), below `fromY`, ignoring props and the body itself. */
+  const supportHeight = useCallback((grab: ActiveGrab, x: number, z: number, fromY: number) => {
+    const ray = new rapier.Ray({ x, y: fromY, z }, { x: 0, y: -1, z: 0 })
+    const hit = world.castRay(ray, 4, true, rapier.QueryFilterFlags.EXCLUDE_DYNAMIC, undefined, undefined, grab.body)
+    if (!hit) return null
+    const toi = (hit as unknown as { toi?: number; timeOfImpact?: number })
+    return fromY - (toi.timeOfImpact ?? toi.toi ?? 0)
+  }, [rapier, world])
+
+  /**
+   * Furniture is kinematic: it keeps its exact collision mesh and pushes props, but
+   * nothing stops it. So it is moved directly, a step at a time, and a step that
+   * would make it overlap a wall or another piece of furniture it was not already
+   * touching is refused -- tried whole, then along x alone, then z alone, so it
+   * slides along a wall instead of sticking to it. It follows the floor's slope.
+   */
+  const slideFurniture = useCallback((grab: ActiveGrab, dt: number) => {
+    const body = grab.body
+    const t = body.translation()
+    const r = body.rotation()
+    const position = new THREE.Vector3(t.x, t.y, t.z)
+    const rotation = new THREE.Quaternion(r.x, r.y, r.z, r.w)
+
+    let nextRotation = rotation
+    if (rotation.angleTo(grab.targetRotation) > 1e-4) {
+      const turned = rotation.clone().slerp(grab.targetRotation, HOLD_ROTATION_EASE)
+      if (!turnBlocked(grab, position, turned)) nextRotation = turned
+    }
+
+    _grabPoint.copy(grab.localAnchor).applyQuaternion(nextRotation).add(position)
+    const step = grab.target.clone().sub(_grabPoint).setY(0).multiplyScalar(KINEMATIC_GAIN)
+    const maxStep = KINEMATIC_SPEED * dt
+    if (step.length() > maxStep) step.setLength(maxStep)
+
+    let next = position
+    if (step.lengthSq() > 1e-10) {
+      // Whole step, else along x alone, else z alone: slides along a wall.
+      for (const candidate of [step, new THREE.Vector3(step.x, 0, 0), new THREE.Vector3(0, 0, step.z)]) {
+        if (candidate.lengthSq() < 1e-10) continue
+        const fraction = travelFraction(grab, position, nextRotation, candidate)
+        if (fraction > 0.05) {
+          next = position.clone().addScaledVector(candidate, fraction)
+          break
+        }
+      }
+    }
+    if (next !== position) {
+      const probeTop = position.y + grab.probe.center.y
+      const from = supportHeight(grab, position.x, position.z, probeTop)
+      const to = supportHeight(grab, next.x, next.z, probeTop)
+      if (from !== null && to !== null) next.y += to - from
+    }
+    // A sleeping kinematic body ignores its next pose; furniture sleeps once settled.
+    body.wakeUp()
+    body.setNextKinematicTranslation(vectorLike(next))
+    body.setNextKinematicRotation(quaternionLike(nextRotation))
+  }, [supportHeight, travelFraction, turnBlocked])
+
   useBeforePhysicsStep((physicsWorld) => {
     const activeGrab = activeGrabRef.current
     if (!activeGrab) return
@@ -406,7 +555,8 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
       activeGrab.releaseVelocity.setLength(GRAB_LINEAR_SPEED_LIMIT)
     }
     activeGrab.previousTarget.copy(activeGrab.target)
-    steerHeldBody(activeGrab, dt)
+    if (activeGrab.kinematic) slideFurniture(activeGrab, dt)
+    else steerHeldBody(activeGrab, dt)
   })
 
   useEffect(() => {
@@ -437,6 +587,7 @@ export function useObjectGrab({ objectRefs, isObjectEligible }: UseObjectGrabArg
       if (!activeGrab) return
       event.preventDefault()
       event.stopImmediatePropagation()
+      if (activeGrab.slide) return  // furniture stays on the floor
       activeGrab.depth = THREE.MathUtils.clamp(
         activeGrab.depth * Math.exp(-event.deltaY * GRAB_DEPTH_PER_WHEEL_PIXEL),
         GRAB_DEPTH_MIN,
