@@ -5,7 +5,7 @@
 """Shrink a world's object GLBs so the viewer loads them quickly, and give them
 collision shapes.
 
-    uv run scripts/compress_objects.py <world-slug> [--large id,id] [--objects id,id]
+    uv run scripts/compress_objects.py <world-slug> [--large id,id] [--objects id,id] [--dims dims.json]
 
 Hunyuan ships every object with three 4096x4096 PNG textures (base colour,
 normal, metallic-roughness): ~20 MB a model, ~380 MB for a 17-object room, and
@@ -26,6 +26,14 @@ Two hidden nodes are added, which the viewer uses instead of a bounding box:
 * `collider-mesh` -- the mesh simplified by vertex clustering on a grid, for
   furniture that does not move. The raw 50k-triangle mesh made every physics
   step test thousands of triangles under each prop resting on it.
+
+With --dims (or `dimensions_m` on an object in image.json), the model is made
+metric: every root node is wrapped in one `metric` node scaled so that, at the
+viewer's OBJECT_SCALE and instance scale 1, the model's largest dimension is the
+object's typical real size. A scene's instance scale then means "times life
+size", and 1 is right. The factor is recorded in that node's extras
+(`metricScale`, `largestM`). A scene authored against the unscaled model must
+divide its scales by `metricScale`.
 
 The original is kept under `worlds/<slug>/originals/<id>/` and is always the
 input, so re-running never compresses twice.
@@ -217,7 +225,8 @@ def append_collider(gltf: dict, new_bin: bytearray, name: str, vertices: np.ndar
     gltf["scenes"][gltf.get("scene", 0)]["nodes"].append(len(gltf["nodes"]) - 1)
 
 
-def compress(object_id: str, src: Path, dst: Path, placed_scale: float | None, force_large: bool) -> tuple[int, int]:
+def compress(object_id: str, src: Path, dst: Path, placed_scale: float | None, force_large: bool,
+             largest_m: float | None = None) -> tuple[int, int]:
     gltf, binary = read_glb(src.read_bytes())
     if any(node.get("name") in COLLIDER_NODES for node in gltf.get("nodes", [])):
         raise ValueError(f"{src} is already compressed; its original is missing")
@@ -227,7 +236,11 @@ def compress(object_id: str, src: Path, dst: Path, placed_scale: float | None, f
 
     vertices, faces = scene_vertices(gltf, binary)
     extent = float((vertices.max(axis=0) - vertices.min(axis=0)).max())
-    large = force_large or (placed_scale is not None and extent * OBJECT_SCALE * placed_scale >= LARGE_EXTENT_M)
+    metric = largest_m / (extent * OBJECT_SCALE) if largest_m else 1.0
+    if largest_m:
+        large = force_large or largest_m * (placed_scale or 1.0) >= LARGE_EXTENT_M
+    else:
+        large = force_large or (placed_scale is not None and extent * OBJECT_SCALE * placed_scale >= LARGE_EXTENT_M)
 
     roles = texture_roles(gltf)
     image_views = {img["bufferView"]: i for i, img in enumerate(gltf.get("images", []))}
@@ -249,15 +262,21 @@ def compress(object_id: str, src: Path, dst: Path, placed_scale: float | None, f
         new_bin += chunk
 
     hull = hull_points(vertices)
+    # In model units, so a metric bake leaves colliders exactly as they were.
     mesh_v, mesh_f = cluster_mesh(vertices, faces, CLUSTER_CELL)
     append_collider(gltf, new_bin, "collider-hull", hull, None)
     append_collider(gltf, new_bin, "collider-mesh", mesh_v, mesh_f)
+    if largest_m:
+        scene = gltf["scenes"][gltf.get("scene", 0)]
+        gltf["nodes"].append({"name": "metric", "scale": [metric] * 3, "children": scene["nodes"],
+                              "extras": {"metricScale": round(metric, 6), "largestM": largest_m}})
+        scene["nodes"] = [len(gltf["nodes"]) - 1]
     gltf["buffers"] = [{"byteLength": len(new_bin) + (-len(new_bin) % 4)}]
 
     out = write_glb(gltf, bytes(new_bin))
     dst.write_bytes(out)
     print(f"  {object_id:24s} {'large' if large else 'prop ':5s} hull {len(hull):3d} pts, "
-          f"mesh {len(faces)} -> {len(mesh_f)} tris")
+          f"mesh {len(faces)} -> {len(mesh_f)} tris" + (f", metric x{metric:.3f} ({largest_m:.2f} m)" if largest_m else ""))
     return src.stat().st_size, len(out)
 
 
@@ -276,11 +295,28 @@ def placed_scales(world: Path) -> dict[str, float]:
     return scales
 
 
+def typical_sizes(world: Path, dims_path: str) -> dict[str, float]:
+    """Largest typical dimension in metres per object id: from a dims file
+    ({id: {height_m, width_m, depth_m}}), else from image.json's `dimensions_m`."""
+    sizes: dict[str, float] = {}
+    image = world / "image.json"
+    if image.exists():
+        for obj in json.loads(image.read_text()).get("objects", []):
+            d = obj.get("dimensions_m")
+            if d:
+                sizes[obj["id"]] = max(float(d.get(k, 0)) for k in ("height_m", "width_m", "depth_m"))
+    if dims_path:
+        for oid, d in json.loads(Path(dims_path).read_text()).items():
+            sizes[oid] = max(float(d[k]) for k in ("height_m", "width_m", "depth_m"))
+    return sizes
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("world", help="world slug, a folder under worlds/")
     parser.add_argument("--large", default="", help="object ids to treat as large furniture, comma-separated")
     parser.add_argument("--objects", default="", help="only these object ids, comma-separated")
+    parser.add_argument("--dims", default="", help="real-world dimensions per object id, JSON; makes models metric")
     args = parser.parse_args()
 
     world = WORLDS / args.world
@@ -290,6 +326,7 @@ def main() -> int:
     force_large = {x for x in args.large.split(",") if x}
     only = {x for x in args.objects.split(",") if x}
     scales = placed_scales(world)
+    sizes = typical_sizes(world, args.dims)
 
     before = after = 0
     for object_dir in sorted(p for p in output.iterdir() if p.is_dir() and p.name != "world"):
@@ -303,7 +340,8 @@ def main() -> int:
                 shutil.copy2(live, original)
             tmp = live.with_suffix(".glb.tmp")
             try:
-                b, a = compress(object_id, original, tmp, scales.get(object_id), object_id in force_large)
+                b, a = compress(object_id, original, tmp, scales.get(object_id), object_id in force_large,
+                                sizes.get(object_id))
             except ValueError as error:
                 tmp.unlink(missing_ok=True)
                 print(f"  skipped {live.name}: {error}")
